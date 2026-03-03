@@ -40,7 +40,7 @@ class Image_processing(Node):
             x_world=(pixel_coordinates[0]-img.shape[1]/2)*K
             y_world=(pixel_coordinates[1]-img.shape[0]/2)*K
             return (x_world,y_world)
-        #img=resup(img,scal_fact=2)
+            
         gray=cv.cvtColor(img,cv.COLOR_BGR2GRAY)
         gauss_blur=cv.GaussianBlur(gray,(7,7),0)
         adaptive_thresh=cv.adaptiveThreshold(gauss_blur,255,cv.ADAPTIVE_THRESH_GAUSSIAN_C,cv.THRESH_BINARY_INV,129,2)
@@ -56,10 +56,7 @@ class Image_processing(Node):
         blue_contours,_=cv.findContours(blue_mask, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE)
         blue_circle_pix_coordinates, blue_hull = circle_detection(blue_contours)
         blue_actual_coordinates=World_coordinates(blue_circle_pix_coordinates,img)
-        print(f'blue circle actual coordinates: {blue_actual_coordinates}')
-        print(f'blue circle pixel coordinates: {blue_circle_pix_coordinates}')
-        cv.drawContours(blank, [blue_hull], -1, (0, 255, 0), 2)
-        cv.circle(blank, blue_circle_pix_coordinates, 5, (255, 0, 0), -1)
+        
         #green circle masking
         lower_green = np.array([40, 50, 50])
         upper_green = np.array([80, 255, 255])
@@ -67,10 +64,7 @@ class Image_processing(Node):
         green_contours,_=cv.findContours(green_mask, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE)
         green_circle_pix_coordinates, green_hull = circle_detection(green_contours)
         green_actual_coordinates=World_coordinates(green_circle_pix_coordinates,img)
-        print(f'green circle actual coordinates: {green_actual_coordinates}')
-        print(f'green circle pixel coordinates: {green_circle_pix_coordinates}')
-        cv.drawContours(blank, [green_hull], -1, (0, 255, 0), 2)
-        cv.circle(blank, green_circle_pix_coordinates, 5, (255, 0, 0), -1)
+        
         #YELLOW circle masking
         lower_yellow = np.array([20, 50, 50])
         upper_yellow = np.array([30, 255, 255])
@@ -78,23 +72,16 @@ class Image_processing(Node):
         yellow_contours,_=cv.findContours(yellow_mask, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE)
         yellow_circle_pix_coordinates,yellow_hull = circle_detection(yellow_contours)
         yellow_actual_coordinates=World_coordinates(yellow_circle_pix_coordinates,img)
-        print(f'Yellow circle actual coordinates: {yellow_actual_coordinates}')
-        print(f'Yellow circle pixel coordinates: {yellow_circle_pix_coordinates}')
-        cv.drawContours(blank, [yellow_hull], -1, (0, 255, 0), 2)
-        cv.circle(blank, yellow_circle_pix_coordinates, 5, (255, 0, 0), -1)
-        cv.imshow('yellow_contours',blank)
-        cv.imshow('yellow_mask',yellow_mask)
-
-
+        
+        #creating 2D binary grid
         otsu_THRESH,otsu_tresh=cv.threshold(gray,0,255,cv.THRESH_BINARY_INV+cv.THRESH_OTSU)
         main_2DGrid=cv.bitwise_or(blue_mask,green_mask)
         main_2DGrid=cv.bitwise_or(main_2DGrid,yellow_mask)
         main_2DGrid=cv.bitwise_or(main_2DGrid,otsu_tresh)
         kernal=np.ones((APPROX_DRONE_RADIUS_IN_PIXELS,APPROX_DRONE_RADIUS_IN_PIXELS),np.uint8)
         inflated_main_2DGrid=cv.dilate(main_2DGrid,kernal,iterations=1)
-        cv.imshow('main_2DGird',inflated_main_2DGrid)      
-        cv.imshow('original',img)
-        print(img.shape)
+       
+        #print(img.shape)
         #coordinates publishing    
         pose_array = PoseArray()
         pose_array.header.stamp = self.get_clock().now().to_msg()
@@ -121,6 +108,25 @@ class Image_processing(Node):
         
         self.BINARY_grid_publisher.publish(binary_data)
 
+        print(f'blue circle actual coordinates: {blue_actual_coordinates}')
+        print(f'blue circle pixel coordinates: {blue_circle_pix_coordinates}')
+        cv.drawContours(blank, [blue_hull], -1, (0, 255, 0), 2)
+        cv.circle(blank, blue_circle_pix_coordinates, 5, (255, 0, 0), -1)
+
+        print(f'green circle actual coordinates: {green_actual_coordinates}')
+        print(f'green circle pixel coordinates: {green_circle_pix_coordinates}')
+        cv.drawContours(blank, [green_hull], -1, (0, 255, 0), 2)
+        cv.circle(blank, green_circle_pix_coordinates, 5, (255, 0, 0), -1)
+
+        print(f'Yellow circle actual coordinates: {yellow_actual_coordinates}')
+        print(f'Yellow circle pixel coordinates: {yellow_circle_pix_coordinates}')
+        cv.drawContours(blank, [yellow_hull], -1, (0, 255, 0), 2)
+        cv.circle(blank, yellow_circle_pix_coordinates, 5, (255, 0, 0), -1)
+        cv.imshow('yellow_contours',blank)
+
+        cv.imshow('main_2DGird',inflated_main_2DGrid)      
+        cv.imshow('original',img)
+    
     cv.waitKey(1)
 
 def main(args=None):
