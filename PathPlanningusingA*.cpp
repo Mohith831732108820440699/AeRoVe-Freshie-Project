@@ -11,7 +11,6 @@
 
 using std::placeholders::_1;
 
-// --- 1. HELPER STRUCTURES (Must be defined before the class) ---
 
 struct Point { float x, y; };
 
@@ -45,8 +44,6 @@ enum class MissionState {
     RETURN_TO_BLUE,
     MISSION_COMPLETE
 };
-
-// --- 2. THE MAIN CLASS ---
 
 class GlobalPlanner : public rclcpp::Node
 {
@@ -148,16 +145,14 @@ private:
         Point start = {current_x_, current_y_};
         Point goal;
 
-        // 1. Check which state we are in, and set the goal accordingly
         if (current_state_ == MissionState::GOING_TO_GREEN) {
             goal = {green_x_, green_y_};
             
-            // Did we reach Green? (e.g., within 0.5 meters)
             float dist = std::hypot(green_x_ - current_x_, green_y_ - current_y_);
             if (dist < 0.5) {
                 RCLCPP_INFO(this->get_logger(), "Reached Green! Dropping payload...");
-                current_state_ = MissionState::GOING_TO_YELLOW; // Switch State!
-                return; // Wait for next timer tick to plan new path
+                current_state_ = MissionState::GOING_TO_YELLOW; 
+                return; 
             }
         } 
         else if (current_state_ == MissionState::GOING_TO_YELLOW) {
@@ -180,10 +175,10 @@ private:
             }
         }
         else if (current_state_ == MissionState::MISSION_COMPLETE) {
-            return; // Stop planning
+            return; 
         }
 
-        // 2. Run A* only ONCE per timer tick for the CURRENT goal
+        
         std::vector<Point> new_path = run_a_star(start, goal);
 
         if (!new_path.empty()) {
@@ -201,7 +196,7 @@ private:
 
         Point target = current_path_[current_wp_index_];
 
-        // Move to next point if close enough (0.2m)
+        
         float distance = std::hypot(target.x - current_x_, target.y - current_y_);
         if (distance < 0.2) {
             current_wp_index_++;
@@ -212,10 +207,10 @@ private:
             target = current_path_[current_wp_index_];
         }
 
-        // Publish to PX4
+       
         px4_msgs::msg::TrajectorySetpoint msg;
         msg.timestamp = this->get_clock()->now().nanoseconds() / 1000;
-        msg.position = {target.x, target.y, -5.0}; // Hover at 5m height (NED uses -5 for Up)
+        msg.position = {target.x, target.y, -5.0}; 
         msg.yaw = std::nanf(""); 
         
         trajectory_pub_->publish(msg);
