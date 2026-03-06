@@ -75,9 +75,8 @@ class Image_processing(Node):
         
         #creating 2D binary grid
         otsu_THRESH,otsu_tresh=cv.threshold(gray,0,255,cv.THRESH_BINARY_INV+cv.THRESH_OTSU)
-        main_2DGrid=cv.bitwise_or(blue_mask,green_mask)
-        main_2DGrid=cv.bitwise_or(main_2DGrid,yellow_mask)
-        main_2DGrid=cv.bitwise_or(main_2DGrid,otsu_tresh)
+        circle_masks=blue_mask+green_mask+yellow_mask
+        main_2DGrid=otsu_tresh-circle_masks
         kernal=np.ones((APPROX_DRONE_RADIUS_IN_PIXELS,APPROX_DRONE_RADIUS_IN_PIXELS),np.uint8)
         inflated_main_2DGrid=cv.dilate(main_2DGrid,kernal,iterations=1)
        
