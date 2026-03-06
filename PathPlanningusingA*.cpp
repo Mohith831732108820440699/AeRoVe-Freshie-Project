@@ -1,8 +1,10 @@
 #include <rclcpp/rclcpp.hpp>
+#include <nav_msgs/msg/path.hpp>
+#include <geometry_msgs/msg/pose_stamped.hpp>
 #include <px4_msgs/msg/trajectory_setpoint.hpp>
 #include <nav_msgs/msg/occupancy_grid.hpp>
 #include <px4_msgs/msg/vehicle_odometry.hpp>
-#include <geometry_msgs/msg/point.hpp>
+#include <geometry_msgs/msg/pose_array.hpp>
 #include <vector>
 #include <queue>
 #include <cmath>
@@ -45,34 +47,29 @@ enum class MissionState {
     MISSION_COMPLETE
 };
 
+// --- 2. THE MAIN CLASS ---
+
 class GlobalPlanner : public rclcpp::Node
 {
 public:
     GlobalPlanner() : Node("global_planner")
     {
         map_sub_ = this->create_subscription<nav_msgs::msg::OccupancyGrid>(
-            "/map", 10, std::bind(&GlobalPlanner::map_callback, this, _1));
+            "/binary_grid", 10, std::bind(&GlobalPlanner::map_callback, this, _1));
 
         odom_sub_ = this->create_subscription<px4_msgs::msg::VehicleOdometry>(
             "/fmu/out/vehicle_odometry", 10, std::bind(&GlobalPlanner::odom_callback, this, _1));
 
-        green_sub_ = this->create_subscription<geometry_msgs::msg::Point>(
-            "/target_green", 10, std::bind(&GlobalPlanner::green_callback, this, _1));
-
-        yellow_sub_ = this->create_subscription<geometry_msgs::msg::Point>(
-            "/target_yellow", 10, std::bind(&GlobalPlanner::yellow_callback, this, _1));
-
-        blue_sub_ = this->create_subscription<geometry_msgs::msg::Point>(
-            "/target_blue", 10, std::bind(&GlobalPlanner::blue_callback, this, _1));
+        targets_sub_ = this->create_subscription<geometry_msgs::msg::PoseArray>(
+            "/circle_coordinates", 10, std::bind(&GlobalPlanner::targets_callback, this, _1));
         
-        
-        // --- NEW PUBLISHER AND CONTROL TIMER ---
         trajectory_pub_ = this->create_publisher<px4_msgs::msg::TrajectorySetpoint>(
             "/fmu/in/trajectory_setpoint", 10);
+        
+        path_pub_ = this->create_publisher<nav_msgs::msg::Path>("/planned_path", 10);
             
         timer_ = this->create_wall_timer(
             std::chrono::milliseconds(2000), std::bind(&GlobalPlanner::timer_callback, this));
-        // This timer runs 20 times a second (50ms) to keep PX4 happy
         control_timer_ = this->create_wall_timer(
             std::chrono::milliseconds(50), std::bind(&GlobalPlanner::control_callback, this));
 
@@ -109,23 +106,24 @@ private:
         current_y_ = msg->position[1]; 
     }
 
-    void green_callback(const geometry_msgs::msg::Point::SharedPtr msg)
+    void targets_callback(const geometry_msgs::msg::PoseArray::SharedPtr msg)
     {
-        green_x_ = msg->x;
-        green_y_ = msg->y;
-        targets_received_ = true; 
-    }
+        if (msg->poses.size() >= 3) {
+           
+            current_x_ = msg->poses[0].position.x;
+            current_y_ = msg->poses[0].position.y;
 
-    void yellow_callback(const geometry_msgs::msg::Point::SharedPtr msg)
-    {
-        yellow_x_ = msg->x;
-        yellow_y_ = msg->y;
-    }
-    
-    void blue_callback(const geometry_msgs::msg::Point::SharedPtr msg)
-    {
-        blue_x_ = msg->x;
-        blue_y_ = msg->y;
+            blue_x_ =  msg->poses[0].position.x;
+            blue_y_ =  msg->poses[0].position.y;
+            
+            green_x_ = msg->poses[1].position.x;
+            green_y_ = msg->poses[1].position.y;
+            
+            yellow_x_ = msg->poses[2].position.x;
+            yellow_y_ = msg->poses[2].position.y;
+
+            targets_received_ = true; 
+        }
     }
 
 
@@ -178,12 +176,30 @@ private:
             return; 
         }
 
-        
         std::vector<Point> new_path = run_a_star(start, goal);
 
         if (!new_path.empty()) {
             current_path_ = new_path;
             current_wp_index_ = 0; 
+
+            // --- NEW: RViz Path Visualization ---
+            nav_msgs::msg::Path path_msg;
+            path_msg.header.stamp = this->get_clock()->now();
+            path_msg.header.frame_id = "MAP"; // Must match your friend's frame exactly!
+
+            for (const auto& point : current_path_) {
+                geometry_msgs::msg::PoseStamped pose;
+                pose.header = path_msg.header;
+                pose.pose.position.x = point.x;
+                pose.pose.position.y = point.y;
+                // You can set Z slightly higher (e.g., 0.5) so the line hovers above the floor in RViz
+                pose.pose.position.z = 0.5; 
+                
+                // No orientation needed for a simple line, so we leave quaternion as default
+                path_msg.poses.push_back(pose);
+            }
+            
+            path_pub_->publish(path_msg);
         }
 
     }
@@ -196,7 +212,6 @@ private:
 
         Point target = current_path_[current_wp_index_];
 
-        
         float distance = std::hypot(target.x - current_x_, target.y - current_y_);
         if (distance < 0.2) {
             current_wp_index_++;
@@ -207,7 +222,6 @@ private:
             target = current_path_[current_wp_index_];
         }
 
-       
         px4_msgs::msg::TrajectorySetpoint msg;
         msg.timestamp = this->get_clock()->now().nanoseconds() / 1000;
         msg.position = {target.x, target.y, -5.0}; 
@@ -246,7 +260,7 @@ private:
     std::vector<Point> run_a_star(Point start_world, Point goal_world)
     { 
         std::vector<Point> path_world;
-    
+    // changes asked to make by gemini for start or end in obstacle error
         GridPoint start = worldToGrid(start_world.x, start_world.y);
         GridPoint goal = worldToGrid(goal_world.x, goal_world.y);
 
@@ -316,10 +330,9 @@ private:
     }
     rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr map_sub_;
     rclcpp::Subscription<px4_msgs::msg::VehicleOdometry>::SharedPtr odom_sub_;
-    rclcpp::Subscription<geometry_msgs::msg::Point>::SharedPtr green_sub_;
-    rclcpp::Subscription<geometry_msgs::msg::Point>::SharedPtr yellow_sub_;
-    rclcpp::Subscription<geometry_msgs::msg::Point>::SharedPtr blue_sub_;
+    rclcpp::Subscription<geometry_msgs::msg::PoseArray>::SharedPtr targets_sub_;
     rclcpp::Publisher<px4_msgs::msg::TrajectorySetpoint>::SharedPtr trajectory_pub_;
+    rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr path_pub_;
     rclcpp::TimerBase::SharedPtr timer_;
     rclcpp::TimerBase::SharedPtr control_timer_;
 };
