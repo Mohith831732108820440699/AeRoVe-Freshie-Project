@@ -226,29 +226,31 @@ private:
     std::vector<Point> run_a_star(Point start_world, Point goal_world)
     { 
         std::vector<Point> path_world;
-        GridPoint start = worldToGrid(start_world.x, start_world.y);
-        GridPoint goal = worldToGrid(goal_world.x, goal_world.y);
+        GridPoint original_start = worldToGrid(start_world.x, start_world.y);
+        GridPoint original_goal = worldToGrid(goal_world.x, goal_world.y);
 
-        auto force_safe = [&](GridPoint p) {
-            if (p.x >= 0 && p.x < (int)current_map_.info.width && 
-                p.y >= 0 && p.y < (int)current_map_.info.height) {
-                int index = p.x + (p.y * current_map_.info.width);
-                current_map_.data[index] = 0; 
-            }
-        };
-        float escape_radius_meters = 0.4; 
-        int r_cells = std::ceil(escape_radius_meters / current_map_.info.resolution);
-        for (int dx = -r_cells; dx <= r_cells; dx++) {
-            for (int dy = -r_cells; dy <= r_cells; dy++) {
-                if (dx*dx + dy*dy <= r_cells*r_cells) { 
-                    force_safe({start.x + dx, start.y + dy});
-                    force_safe({goal.x + dx, goal.y + dy});
+        // --- THE RESCUE SEARCH (No map deletion!) ---
+        // Finds the nearest safe pixel without destroying the walls
+        auto find_nearest_free = [&](GridPoint p) -> GridPoint {
+            if (isValid(p)) return p;
+            for (int r = 1; r <= 30; r++) { // Scan up to 30 pixels away
+                for (int dx = -r; dx <= r; dx++) {
+                    for (int dy = -r; dy <= r; dy++) {
+                        if (abs(dx) == r || abs(dy) == r) {
+                            GridPoint test = {p.x + dx, p.y + dy};
+                            if (isValid(test)) return test;
+                        }
+                    }
                 }
             }
-        }
+            return p; 
+        };
+
+        GridPoint start = find_nearest_free(original_start);
+        GridPoint goal = find_nearest_free(original_goal);
 
         if (!isValid(start) || !isValid(goal)) {
-            RCLCPP_WARN(this->get_logger(), "Start or Goal is inside an obstacle!");
+            RCLCPP_WARN(this->get_logger(), "Start or Goal is buried too deep to rescue!");
             return path_world;
         }
 
@@ -277,6 +279,12 @@ private:
                     curr = parents[curr];
                 }
                 path_world.push_back(gridToWorld(start)); 
+                
+                // If we rescued the drone, add the exact physical location to bridge the gap!
+                if (!(start == original_start)) {
+                    path_world.push_back(gridToWorld(original_start)); 
+                }
+                
                 std::reverse(path_world.begin(), path_world.end()); 
                 return path_world;
             }
@@ -289,6 +297,7 @@ private:
 
                 if (!isValid(neighbor)) continue;
 
+                // Make diagonal movement cost slightly more to encourage straighter paths
                 float move_cost = (dx[i] == 0 || dy[i] == 0) ? 1.0 : 1.414;
                 float tentative_g = g_scores[current.pos] + move_cost;
 
