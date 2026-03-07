@@ -270,4 +270,53 @@ private:
                     path_world.push_back(gridToWorld(curr));
                     curr = parents[curr];
                 }
-                path_world.push_back(gridToWorld
+                path_world.push_back(gridToWorld(start)); 
+                std::reverse(path_world.begin(), path_world.end()); 
+                return path_world;
+            }
+
+            int dx[] = {1, 1, 0, -1, -1, -1, 0, 1};
+            int dy[] = {0, 1, 1, 1, 0, -1, -1, -1};
+
+            for (int i = 0; i < 8; i++) {
+                GridPoint neighbor = {current.pos.x + dx[i], current.pos.y + dy[i]};
+
+                if (!isValid(neighbor)) continue;
+
+                float move_cost = (dx[i] == 0 || dy[i] == 0) ? 1.0 : 1.414;
+                float tentative_g = g_scores[current.pos] + move_cost;
+
+                if (g_scores.find(neighbor) == g_scores.end() || tentative_g < g_scores[neighbor]) {
+                    g_scores[neighbor] = tentative_g;
+                    parents[neighbor] = current.pos;
+
+                    AStarNode neighbor_node;
+                    neighbor_node.pos = neighbor;
+                    neighbor_node.g_cost = tentative_g;
+                    neighbor_node.h_cost = std::hypot(goal.x - neighbor.x, goal.y - neighbor.y);
+                    neighbor_node.f_cost = neighbor_node.g_cost + neighbor_node.h_cost;
+                    
+                    open_set.push(neighbor_node);
+                }
+            }
+        }
+
+        RCLCPP_WARN(this->get_logger(), "No path found!");
+        return path_world; 
+    }
+
+    rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr map_sub_;
+    rclcpp::Subscription<geometry_msgs::msg::PoseArray>::SharedPtr targets_sub_;
+    rclcpp::Subscription<std_msgs::msg::String>::SharedPtr event_sub_;
+    rclcpp::Publisher<std_msgs::msg::Float32MultiArray>::SharedPtr waypoint_list_pub_;
+    rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr path_pub_;
+    rclcpp::TimerBase::SharedPtr timer_;
+};
+
+int main(int argc, char * argv[])
+{
+    rclcpp::init(argc, argv);
+    rclcpp::spin(std::make_shared<GlobalPlanner>());
+    rclcpp::shutdown();
+    return 0;
+}
