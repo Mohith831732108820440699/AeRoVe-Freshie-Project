@@ -1,0 +1,273 @@
+#include <rclcpp/rclcpp.hpp>
+#include <nav_msgs/msg/path.hpp>
+#include <geometry_msgs/msg/pose_stamped.hpp>
+#include <nav_msgs/msg/occupancy_grid.hpp>
+#include <geometry_msgs/msg/pose_array.hpp>
+#include <std_msgs/msg/float32_multi_array.hpp> // <-- New!
+#include <std_msgs/msg/string.hpp>              // <-- New!
+#include <vector>
+#include <queue>
+#include <cmath>
+#include <algorithm>
+#include <unordered_map>
+
+using std::placeholders::_1;
+
+struct Point { float x, y; };
+
+struct GridPoint {
+    int x, y;
+    bool operator==(const GridPoint& other) const {
+        return x == other.x && y == other.y;
+    }
+};
+
+struct GridPointHash {
+    std::size_t operator()(const GridPoint& p) const {
+        return std::hash<int>()(p.x) ^ std::hash<int>()(p.y);
+    }
+};
+
+struct AStarNode {
+    GridPoint pos;
+    float g_cost;
+    float h_cost;
+    float f_cost;
+    GridPoint parent;
+
+    bool operator>(const AStarNode& other) const {
+        return f_cost > other.f_cost;
+    }
+};
+
+enum class MissionState {
+    GOING_TO_GREEN,
+    GOING_TO_YELLOW,
+    RETURN_TO_BLUE,
+    MISSION_COMPLETE
+};
+
+// --- THE MAIN CLASS ---
+
+class GlobalPlanner : public rclcpp::Node
+{
+public:
+    GlobalPlanner() : Node("global_planner")
+    {
+        // 1. Map from OpenCV
+        map_sub_ = this->create_subscription<nav_msgs::msg::OccupancyGrid>(
+            "/binary_grid", 10, std::bind(&GlobalPlanner::map_callback, this, _1));
+
+        // 2. Coordinates from OpenCV (Blue circle replaces Odometry!)
+        targets_sub_ = this->create_subscription<geometry_msgs::msg::PoseArray>(
+            "/circle_coordinates", 10, std::bind(&GlobalPlanner::targets_callback, this, _1));
+        
+        // 3. NEW: Listen to the Python script for mission events!
+        event_sub_ = this->create_subscription<std_msgs::msg::String>(
+            "/mission_event", 10, std::bind(&GlobalPlanner::event_callback, this, _1));
+
+        // 4. NEW: Publish the path as an array for the Python script
+        waypoint_list_pub_ = this->create_publisher<std_msgs::msg::Float32MultiArray>(
+            "/waypoint_list", 10);
+        
+        // 5. Keep RViz Visualization
+        path_pub_ = this->create_publisher<nav_msgs::msg::Path>("/planned_path", 10);
+            
+        // 6. Planner loop (Runs every 2 seconds to update the path)
+        timer_ = this->create_wall_timer(
+            std::chrono::milliseconds(2000), std::bind(&GlobalPlanner::timer_callback, this));
+
+        RCLCPP_INFO(this->get_logger(), "Planner Brain Started! Waiting for camera and map...");
+    }
+
+private:
+    nav_msgs::msg::OccupancyGrid current_map_;
+    float current_x_ = 0.0;
+    float current_y_ = 0.0;
+    bool map_received_ = false;
+
+    float green_x_ = 0.0, green_y_ = 0.0;
+    float yellow_x_ = 0.0, yellow_y_ = 0.0;
+    float blue_x_ = 0.0, blue_y_ = 0.0;
+    bool targets_received_ = false;
+
+    MissionState current_state_ = MissionState::GOING_TO_GREEN;
+    std::vector<Point> current_path_;   
+
+    void map_callback(const nav_msgs::msg::OccupancyGrid::SharedPtr msg)
+    {
+        current_map_ = *msg;
+        map_received_ = true;
+    }
+
+    void targets_callback(const geometry_msgs::msg::PoseArray::SharedPtr msg)
+    {
+        if (msg->poses.size() >= 3) {
+            // Drone current position is always the blue circle
+            current_x_ = msg->poses[0].position.x;
+            current_y_ = msg->poses[0].position.y;
+            blue_x_ =  msg->poses[0].position.x;
+            blue_y_ =  msg->poses[0].position.y;
+            
+            green_x_ = msg->poses[1].position.x;
+            green_y_ = msg->poses[1].position.y;
+            
+            yellow_x_ = msg->poses[2].position.x;
+            yellow_y_ = msg->poses[2].position.y;
+
+            targets_received_ = true; 
+        }
+    }
+
+    // NEW: Handle state transitions based on what the Python Pilot physically achieved
+    void event_callback(const std_msgs::msg::String::SharedPtr msg)
+    {
+        if (msg->data == "arrived_green" && current_state_ == MissionState::GOING_TO_GREEN) {
+            RCLCPP_INFO(this->get_logger(), "EVENT: Drone reached Green! Dropping payload and switching to Yellow...");
+            current_state_ = MissionState::GOING_TO_YELLOW;
+        }
+        else if (msg->data == "arrived_yellow" && current_state_ == MissionState::GOING_TO_YELLOW) {
+            RCLCPP_INFO(this->get_logger(), "EVENT: Drone reached Yellow! Scanning Aruco and returning home...");
+            current_state_ = MissionState::RETURN_TO_BLUE;
+        }
+        else if (msg->data == "arrived_blue" && current_state_ == MissionState::RETURN_TO_BLUE) {
+            RCLCPP_INFO(this->get_logger(), "EVENT: Drone returned to Blue! MISSION COMPLETE.");
+            current_state_ = MissionState::MISSION_COMPLETE;
+        }
+    }
+
+    void timer_callback()
+    {
+        if (!map_received_) return;
+        if (!targets_received_) return;
+        if (current_state_ == MissionState::MISSION_COMPLETE) return; 
+
+        Point start = {current_x_, current_y_};
+        Point goal;
+
+        // Set the current goal based on the state machine
+        if (current_state_ == MissionState::GOING_TO_GREEN) {
+            goal = {green_x_, green_y_};
+        } 
+        else if (current_state_ == MissionState::GOING_TO_YELLOW) {
+            goal = {yellow_x_, yellow_y_};
+        }
+        else if (current_state_ == MissionState::RETURN_TO_BLUE) {
+            goal = {blue_x_, blue_y_};
+        }
+
+        // Calculate the path
+        std::vector<Point> new_path = run_a_star(start, goal);
+
+        if (!new_path.empty()) {
+            current_path_ = new_path;
+
+            // --- 1. PUBLISH ARRAY TO PYTHON PILOT ---
+            std_msgs::msg::Float32MultiArray wp_msg;
+            for (const auto& point : current_path_) {
+                wp_msg.data.push_back(point.x);
+                wp_msg.data.push_back(point.y);
+                wp_msg.data.push_back(5.0); // Z-altitude defaults to 5.0m
+            }
+            waypoint_list_pub_->publish(wp_msg);
+
+            // --- 2. PUBLISH PATH TO RVIZ ---
+            nav_msgs::msg::Path path_msg;
+            path_msg.header.stamp = this->get_clock()->now();
+            path_msg.header.frame_id = "MAP"; 
+
+            for (const auto& point : current_path_) {
+                geometry_msgs::msg::PoseStamped pose;
+                pose.header = path_msg.header;
+                pose.pose.position.x = point.x;
+                pose.pose.position.y = point.y;
+                pose.pose.position.z = 0.5; 
+                path_msg.poses.push_back(pose);
+            }
+            path_pub_->publish(path_msg);
+        }
+    }
+
+    GridPoint worldToGrid(float wx, float wy) {
+        GridPoint p;
+        p.x = static_cast<int>((wx - current_map_.info.origin.position.x) / current_map_.info.resolution);
+        p.y = static_cast<int>((wy - current_map_.info.origin.position.y) / current_map_.info.resolution);
+        return p;
+    }
+
+    Point gridToWorld(GridPoint gp) {
+        Point p;
+        p.x = (gp.x * current_map_.info.resolution) + current_map_.info.origin.position.x;
+        p.y = (gp.y * current_map_.info.resolution) + current_map_.info.origin.position.y;
+        return p;
+    }
+
+    bool isValid(GridPoint p) {
+        if (p.x < 0 || p.x >= (int)current_map_.info.width || 
+            p.y < 0 || p.y >= (int)current_map_.info.height) {
+            return false;
+        }
+        int index = p.x + (p.y * current_map_.info.width);
+        if (current_map_.data[index] > 50) { 
+            return false;
+        }
+        return true;
+    }
+
+    std::vector<Point> run_a_star(Point start_world, Point goal_world)
+    { 
+        std::vector<Point> path_world;
+        GridPoint start = worldToGrid(start_world.x, start_world.y);
+        GridPoint goal = worldToGrid(goal_world.x, goal_world.y);
+
+        // --- BULLETPROOF FIX V2: ESCAPE THE DILATION CAVE ---
+        auto force_safe = [&](GridPoint p) {
+            if (p.x >= 0 && p.x < (int)current_map_.info.width && 
+                p.y >= 0 && p.y < (int)current_map_.info.height) {
+                int index = p.x + (p.y * current_map_.info.width);
+                current_map_.data[index] = 0; // Force to Safe Free Space
+            }
+        };
+
+        // Carve a 40cm hole around the start and end points so the algorithm doesn't get trapped
+        float escape_radius_meters = 0.4; 
+        int r_cells = std::ceil(escape_radius_meters / current_map_.info.resolution);
+        for (int dx = -r_cells; dx <= r_cells; dx++) {
+            for (int dy = -r_cells; dy <= r_cells; dy++) {
+                if (dx*dx + dy*dy <= r_cells*r_cells) { 
+                    force_safe({start.x + dx, start.y + dy});
+                    force_safe({goal.x + dx, goal.y + dy});
+                }
+            }
+        }
+
+        if (!isValid(start) || !isValid(goal)) {
+            RCLCPP_WARN(this->get_logger(), "Start or Goal is completely outside the map bounds!");
+            return path_world;
+        }
+
+        std::priority_queue<AStarNode, std::vector<AStarNode>, std::greater<AStarNode>> open_set;
+        std::unordered_map<GridPoint, float, GridPointHash> g_scores; 
+        std::unordered_map<GridPoint, GridPoint, GridPointHash> parents; 
+
+        AStarNode start_node;
+        start_node.pos = start;
+        start_node.g_cost = 0.0;
+        start_node.h_cost = std::hypot(goal.x - start.x, goal.y - start.y); 
+        start_node.f_cost = start_node.g_cost + start_node.h_cost;
+        start_node.parent = {-1, -1}; 
+
+        open_set.push(start_node);
+        g_scores[start] = 0.0;
+
+        while (!open_set.empty()) {
+            AStarNode current = open_set.top();
+            open_set.pop();
+
+            if (current.pos == goal) {
+                GridPoint curr = goal;
+                while (!(curr == start)) {
+                    path_world.push_back(gridToWorld(curr));
+                    curr = parents[curr];
+                }
+                path_world.push_back(gridToWorld
