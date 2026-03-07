@@ -1,11 +1,10 @@
 #include <rclcpp/rclcpp.hpp>
 #include <nav_msgs/msg/path.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
+#include <px4_msgs/msg/trajectory_setpoint.hpp>
 #include <nav_msgs/msg/occupancy_grid.hpp>
-#include <nav_msgs/msg/odometry.hpp>            // <-- NEW: For exact X3 drone position!
+#include <px4_msgs/msg/vehicle_odometry.hpp>
 #include <geometry_msgs/msg/pose_array.hpp>
-#include <std_msgs/msg/float32_multi_array.hpp> 
-#include <std_msgs/msg/string.hpp>              
 #include <vector>
 #include <queue>
 #include <cmath>
@@ -13,6 +12,7 @@
 #include <unordered_map>
 
 using std::placeholders::_1;
+
 
 struct Point { float x, y; };
 
@@ -40,13 +40,14 @@ struct AStarNode {
         return f_cost > other.f_cost;
     }
 };
-
 enum class MissionState {
     GOING_TO_GREEN,
     GOING_TO_YELLOW,
     RETURN_TO_BLUE,
     MISSION_COMPLETE
 };
+
+// --- 2. THE MAIN CLASS ---
 
 class GlobalPlanner : public rclcpp::Node
 {
@@ -56,29 +57,29 @@ public:
         map_sub_ = this->create_subscription<nav_msgs::msg::OccupancyGrid>(
             "/binary_grid", 10, std::bind(&GlobalPlanner::map_callback, this, _1));
 
+        odom_sub_ = this->create_subscription<px4_msgs::msg::VehicleOdometry>(
+            "/fmu/out/vehicle_odometry", 10, std::bind(&GlobalPlanner::odom_callback, this, _1));
+
         targets_sub_ = this->create_subscription<geometry_msgs::msg::PoseArray>(
             "/circle_coordinates", 10, std::bind(&GlobalPlanner::targets_callback, this, _1));
         
-        // --- NEW: Subscribe to the exact Gazebo odometry for the X3 drone ---
-        odom_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
-            "/model/x3/odometry", 10, std::bind(&GlobalPlanner::odom_callback, this, _1));
-
-        event_sub_ = this->create_subscription<std_msgs::msg::String>(
-            "/mission_event", 10, std::bind(&GlobalPlanner::event_callback, this, _1));
-        
-        waypoint_list_pub_ = this->create_publisher<std_msgs::msg::Float32MultiArray>(
-            "/waypoint_list", 10);
+        trajectory_pub_ = this->create_publisher<px4_msgs::msg::TrajectorySetpoint>(
+            "/fmu/in/trajectory_setpoint", 10);
         
         path_pub_ = this->create_publisher<nav_msgs::msg::Path>("/planned_path", 10);
             
         timer_ = this->create_wall_timer(
             std::chrono::milliseconds(2000), std::bind(&GlobalPlanner::timer_callback, this));
+        control_timer_ = this->create_wall_timer(
+            std::chrono::milliseconds(50), std::bind(&GlobalPlanner::control_callback, this));
 
-        RCLCPP_INFO(this->get_logger(), "Planner Brain Started! Waiting for data...");
+        RCLCPP_INFO(this->get_logger(), "Planner Started!");
     }
 
 private:
     nav_msgs::msg::OccupancyGrid current_map_;
+    float current_x_ = 0.0;
+    float current_y_ = 0.0;
     bool map_received_ = false;
 
     float green_x_ = 0.0, green_y_ = 0.0;
@@ -86,16 +87,12 @@ private:
     float blue_x_ = 0.0, blue_y_ = 0.0;
     bool targets_received_ = false;
 
-    // --- NEW: Exact Odometry Variables ---
-    float odom_x_ = 0.0;
-    float odom_y_ = 0.0;
-    float odom_start_x_ = 0.0;
-    float odom_start_y_ = 0.0;
-    bool odom_initialized_ = false;
+    MissionState current_state_ = MissionState::GOING_TO_YELLOW;
 
-    MissionState current_state_ = MissionState::GOING_TO_GREEN;
+
     std::vector<Point> current_path_;   
-    bool path_calculated_ = false; 
+    size_t current_wp_index_ = 0;
+
 
     void map_callback(const nav_msgs::msg::OccupancyGrid::SharedPtr msg)
     {
@@ -103,100 +100,143 @@ private:
         map_received_ = true;
     }
 
+    void odom_callback(const px4_msgs::msg::VehicleOdometry::SharedPtr msg)
+    {
+        current_x_ = msg->position[0]; 
+        current_y_ = msg->position[1]; 
+    }
+
     void targets_callback(const geometry_msgs::msg::PoseArray::SharedPtr msg)
     {
         if (msg->poses.size() >= 3) {
+           
+            current_x_ = msg->poses[1].position.x;
+            current_y_ = msg->poses[1].position.y;
+
             blue_x_ =  msg->poses[0].position.x;
             blue_y_ =  msg->poses[0].position.y;
+            
             green_x_ = msg->poses[1].position.x;
             green_y_ = msg->poses[1].position.y;
+            
             yellow_x_ = msg->poses[2].position.x;
             yellow_y_ = msg->poses[2].position.y;
+
             targets_received_ = true; 
         }
     }
 
-    // --- NEW: Get the absolute exact physical position of the drone ---
-    void odom_callback(const nav_msgs::msg::Odometry::SharedPtr msg)
-    {
-        odom_x_ = msg->pose.pose.position.x;
-        odom_y_ = msg->pose.pose.position.y;
-        
-        // Capture the spawn location so we can calculate displacement later
-        if (!odom_initialized_) {
-            odom_start_x_ = odom_x_;
-            odom_start_y_ = odom_y_;
-            odom_initialized_ = true;
-        }
-    }
 
-    void event_callback(const std_msgs::msg::String::SharedPtr msg)
-    {
-        if (msg->data == "arrived_green" && current_state_ == MissionState::GOING_TO_GREEN) {
-            RCLCPP_INFO(this->get_logger(), "EVENT: Reached Green! Dropping payload...");
-            current_state_ = MissionState::GOING_TO_YELLOW;
-            path_calculated_ = false; 
-        }
-        else if (msg->data == "arrived_yellow" && current_state_ == MissionState::GOING_TO_YELLOW) {
-            RCLCPP_INFO(this->get_logger(), "EVENT: Reached Yellow! Scanning Aruco...");
-            current_state_ = MissionState::RETURN_TO_BLUE;
-            path_calculated_ = false; 
-        }
-        else if (msg->data == "arrived_blue" && current_state_ == MissionState::RETURN_TO_BLUE) {
-            RCLCPP_INFO(this->get_logger(), "EVENT: Returned to Blue! MISSION COMPLETE.");
-            current_state_ = MissionState::MISSION_COMPLETE;
-        }
-    }
+
 
     void timer_callback()
     {
-        // Must wait until camera, map, and Gazebo odometry are all online!
-        if (!map_received_ || !targets_received_ || !odom_initialized_) return;
-        if (current_state_ == MissionState::MISSION_COMPLETE) return;
-        if (path_calculated_) return; 
+        if (!map_received_) {
+            RCLCPP_WARN(this->get_logger(), "Waiting for map...");
+            return;
+        }
+        if (!targets_received_) {
+            RCLCPP_WARN(this->get_logger(), "Waiting for target coordinates from camera...");
+            return;
+        }
 
-        // --- THE FIX: Calculate exact position on the OpenCV map! ---
-        // Drone started at Blue. We add the exact physical distance it has moved in Gazebo.
-        float exact_map_x = blue_x_ + (odom_x_ - odom_start_x_);
-        float exact_map_y = blue_y_ + (odom_y_ - odom_start_y_);
-
-        Point start = {exact_map_x, exact_map_y}; // TRUE DYNAMIC POSITION!
+        Point start = {current_x_, current_y_};
         Point goal;
 
-        if (current_state_ == MissionState::GOING_TO_GREEN) goal = {green_x_, green_y_};
-        else if (current_state_ == MissionState::GOING_TO_YELLOW) goal = {yellow_x_, yellow_y_};
-        else if (current_state_ == MissionState::RETURN_TO_BLUE) goal = {blue_x_, blue_y_};
+        if (current_state_ == MissionState::GOING_TO_GREEN) {
+            goal = {green_x_, green_y_};
+            
+            float dist = std::hypot(green_x_ - current_x_, green_y_ - current_y_);
+            if (dist < 0.5) {
+                RCLCPP_INFO(this->get_logger(), "Reached Green! Dropping payload...");
+                current_state_ = MissionState::GOING_TO_YELLOW; 
+                return; 
+            }
+        } 
+        else if (current_state_ == MissionState::GOING_TO_YELLOW) {
+            goal = {yellow_x_, yellow_y_};
+            
+            float dist = std::hypot(yellow_x_ - current_x_, yellow_y_ - current_y_);
+            if (dist < 0.5) {
+                RCLCPP_INFO(this->get_logger(), "Reached Yellow! Scanning Aruco...");
+                current_state_ = MissionState::RETURN_TO_BLUE;
+                return;
+            }
+        }
+        else if (current_state_ == MissionState::RETURN_TO_BLUE) {
+            goal = {blue_x_, blue_y_};
+            float dist = std::hypot(blue_x_ - current_x_, blue_y_ - current_y_);
+            if (dist < 0.5) {
+                RCLCPP_INFO(this->get_logger(), "Reached Blue! MISSION__COMPLETED  Respect+++++++  Aura +++++..");
+                current_state_ = MissionState::MISSION_COMPLETE;
+                return;
+            }
+        }
+        else if (current_state_ == MissionState::MISSION_COMPLETE) {
+            return; 
+        }
 
-        std::vector<Point> new_path = run_a_star(start, goal);
+        std::vector<Point> new_path;
+
+        // Hot-swap algorithms based on the mission stage!
+        if (current_state_ == MissionState::GOING_TO_YELLOW) {
+            RCLCPP_INFO(this->get_logger(), "Switching to RRT to navigate the tight corridor...");
+            new_path = run_rrt(start, goal);
+        } else {
+            RCLCPP_INFO(this->get_logger(), "Using A* for optimal pathing...");
+            new_path = run_a_star(start, goal);
+        }
 
         if (!new_path.empty()) {
             current_path_ = new_path;
-            
-            std_msgs::msg::Float32MultiArray wp_msg;
-            for (size_t i = 1; i < current_path_.size(); ++i) {
-                wp_msg.data.push_back(current_path_[i].x);
-                wp_msg.data.push_back(current_path_[i].y);
-                wp_msg.data.push_back(5.0); 
-            }
-            waypoint_list_pub_->publish(wp_msg);
+            current_wp_index_ = 0; 
 
-            path_calculated_ = true; 
-            RCLCPP_INFO(this->get_logger(), "Path planned from EXACT position [%.2f, %.2f] to Target!", exact_map_x, exact_map_y);
-
+            // --- NEW: RViz Path Visualization ---
             nav_msgs::msg::Path path_msg;
             path_msg.header.stamp = this->get_clock()->now();
-            path_msg.header.frame_id = "MAP"; 
+            path_msg.header.frame_id = "MAP"; // Must match your friend's frame exactly!
 
             for (const auto& point : current_path_) {
                 geometry_msgs::msg::PoseStamped pose;
                 pose.header = path_msg.header;
                 pose.pose.position.x = point.x;
                 pose.pose.position.y = point.y;
+                // You can set Z slightly higher (e.g., 0.5) so the line hovers above the floor in RViz
                 pose.pose.position.z = 0.5; 
+                
+                // No orientation needed for a simple line, so we leave quaternion as default
                 path_msg.poses.push_back(pose);
             }
+            
             path_pub_->publish(path_msg);
         }
+
+    }
+
+    void control_callback()
+    {
+        if (current_path_.empty() || current_wp_index_ >= current_path_.size()) {
+            return; 
+        }
+
+        Point target = current_path_[current_wp_index_];
+
+        float distance = std::hypot(target.x - current_x_, target.y - current_y_);
+        if (distance < 0.2) {
+            current_wp_index_++;
+            if (current_wp_index_ >= current_path_.size()) {
+                current_path_.clear(); 
+                return;
+            }
+            target = current_path_[current_wp_index_];
+        }
+
+        px4_msgs::msg::TrajectorySetpoint msg;
+        msg.timestamp = this->get_clock()->now().nanoseconds() / 1000;
+        msg.position = {target.x, target.y, -5.0}; 
+        msg.yaw = std::nanf(""); 
+        
+        trajectory_pub_->publish(msg);
     }
 
     GridPoint worldToGrid(float wx, float wy) {
@@ -218,39 +258,41 @@ private:
             p.y < 0 || p.y >= (int)current_map_.info.height) {
             return false;
         }
+    
         int index = p.x + (p.y * current_map_.info.width);
-        if (current_map_.data[index] > 50) return false;
+        if (current_map_.data[index] > 50) { 
+            return false;
+        }
         return true;
     }
+    struct RRTNode {
+        Point pos;
+        int parent;
+    };
+
+    bool is_line_free(Point p1, Point p2) {
+        // Interpolate along the line to ensure it doesn't cross an obstacle
+        int steps = std::max(10, (int)(std::hypot(p2.x - p1.x, p2.y - p1.y) / (current_map_.info.resolution / 2.0)));
+        for (int i = 0; i <= steps; i++) {
+            float t = (float)i / steps;
+            float cx = p1.x + t * (p2.x - p1.x);
+            float cy = p1.y + t * (p2.y - p1.y);
+            GridPoint gp = worldToGrid(cx, cy);
+            if (!isValid(gp)) return false; // Hit a wall!
+        }
+        return true;
+    }
+
 
     std::vector<Point> run_a_star(Point start_world, Point goal_world)
     { 
         std::vector<Point> path_world;
-        GridPoint original_start = worldToGrid(start_world.x, start_world.y);
-        GridPoint original_goal = worldToGrid(goal_world.x, goal_world.y);
-
-        // --- THE RESCUE SEARCH (No map deletion!) ---
-        // Finds the nearest safe pixel without destroying the walls
-        auto find_nearest_free = [&](GridPoint p) -> GridPoint {
-            if (isValid(p)) return p;
-            for (int r = 1; r <= 30; r++) { // Scan up to 30 pixels away
-                for (int dx = -r; dx <= r; dx++) {
-                    for (int dy = -r; dy <= r; dy++) {
-                        if (abs(dx) == r || abs(dy) == r) {
-                            GridPoint test = {p.x + dx, p.y + dy};
-                            if (isValid(test)) return test;
-                        }
-                    }
-                }
-            }
-            return p; 
-        };
-
-        GridPoint start = find_nearest_free(original_start);
-        GridPoint goal = find_nearest_free(original_goal);
+    // changes asked to make by gemini for start or end in obstacle error
+        GridPoint start = worldToGrid(start_world.x, start_world.y);
+        GridPoint goal = worldToGrid(goal_world.x, goal_world.y);
 
         if (!isValid(start) || !isValid(goal)) {
-            RCLCPP_WARN(this->get_logger(), "Start or Goal is buried too deep to rescue!");
+            RCLCPP_WARN(this->get_logger(), "Start or Goal is inside an obstacle!");
             return path_world;
         }
 
@@ -279,13 +321,8 @@ private:
                     curr = parents[curr];
                 }
                 path_world.push_back(gridToWorld(start)); 
-                
-                // If we rescued the drone, add the exact physical location to bridge the gap!
-                if (!(start == original_start)) {
-                    path_world.push_back(gridToWorld(original_start)); 
-                }
-                
                 std::reverse(path_world.begin(), path_world.end()); 
+                RCLCPP_INFO(this->get_logger(), "Path found successfully!");
                 return path_world;
             }
 
@@ -297,7 +334,6 @@ private:
 
                 if (!isValid(neighbor)) continue;
 
-                // Make diagonal movement cost slightly more to encourage straighter paths
                 float move_cost = (dx[i] == 0 || dy[i] == 0) ? 1.0 : 1.414;
                 float tentative_g = g_scores[current.pos] + move_cost;
 
@@ -315,17 +351,84 @@ private:
                 }
             }
         }
+
         RCLCPP_WARN(this->get_logger(), "No path found!");
         return path_world; 
     }
-    
+
+    std::vector<Point> run_rrt(Point start_world, Point goal_world) {
+        std::vector<Point> path_world;
+        std::vector<RRTNode> tree;
+        tree.push_back({start_world, -1});
+
+        float step_size = 0.4; // Grows the tree in 40cm jumps
+        int max_iter = 10000;
+
+        float min_x = current_map_.info.origin.position.x;
+        float max_x = min_x + (current_map_.info.width * current_map_.info.resolution);
+        float min_y = current_map_.info.origin.position.y;
+        float max_y = min_y + (current_map_.info.height * current_map_.info.resolution);
+
+        for (int i = 0; i < max_iter; i++) {
+            Point rand_point;
+            // 15% chance to aim directly at the goal, otherwise pick a random spot in the room
+            if (rand() % 100 < 15) {
+                rand_point = goal_world;
+            } else {
+                rand_point.x = min_x + static_cast<float>(rand()) / (static_cast<float>(RAND_MAX / (max_x - min_x)));
+                rand_point.y = min_y + static_cast<float>(rand()) / (static_cast<float>(RAND_MAX / (max_y - min_y)));
+            }
+
+            // Find the closest existing node in our tree
+            int nearest_idx = 0;
+            float min_dist = 1e9;
+            for (size_t j = 0; j < tree.size(); j++) {
+                float d = std::hypot(tree[j].pos.x - rand_point.x, tree[j].pos.y - rand_point.y);
+                if (d < min_dist) {
+                    min_dist = d;
+                    nearest_idx = j;
+                }
+            }
+
+            // Steer from the nearest node towards the random point
+            Point nearest_pos = tree[nearest_idx].pos;
+            float theta = std::atan2(rand_point.y - nearest_pos.y, rand_point.x - nearest_pos.x);
+            Point new_point;
+            new_point.x = nearest_pos.x + step_size * std::cos(theta);
+            new_point.y = nearest_pos.y + step_size * std::sin(theta);
+
+            // If the new branch doesn't hit a wall, add it to the tree!
+            if (is_line_free(nearest_pos, new_point)) {
+                tree.push_back({new_point, nearest_idx});
+
+                // Check if we reached the Yellow target
+                if (std::hypot(new_point.x - goal_world.x, new_point.y - goal_world.y) < step_size) {
+                    if (is_line_free(new_point, goal_world)) {
+                        tree.push_back({goal_world, (int)tree.size() - 1});
+                        
+                        // Backtrack to build the final path
+                        int curr = tree.size() - 1;
+                        while (curr != -1) {
+                            path_world.push_back(tree[curr].pos);
+                            curr = tree[curr].parent;
+                        }
+                        std::reverse(path_world.begin(), path_world.end());
+                        RCLCPP_INFO(this->get_logger(), "RRT successfully navigated the trap!");
+                        return path_world;
+                    }
+                }
+            }
+        }
+        RCLCPP_WARN(this->get_logger(), "RRT timed out trying to find a path!");
+        return path_world; 
+    }
     rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr map_sub_;
+    rclcpp::Subscription<px4_msgs::msg::VehicleOdometry>::SharedPtr odom_sub_;
     rclcpp::Subscription<geometry_msgs::msg::PoseArray>::SharedPtr targets_sub_;
-    rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_; // Exact position!
-    rclcpp::Subscription<std_msgs::msg::String>::SharedPtr event_sub_;
-    rclcpp::Publisher<std_msgs::msg::Float32MultiArray>::SharedPtr waypoint_list_pub_;
+    rclcpp::Publisher<px4_msgs::msg::TrajectorySetpoint>::SharedPtr trajectory_pub_;
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr path_pub_;
     rclcpp::TimerBase::SharedPtr timer_;
+    rclcpp::TimerBase::SharedPtr control_timer_;
 };
 
 int main(int argc, char * argv[])
