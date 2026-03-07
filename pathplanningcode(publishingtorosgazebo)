@@ -162,12 +162,23 @@ private:
         if (!new_path.empty()) {
             current_path_ = new_path;
 
-            // --- 1. PUBLISH ARRAY TO PYTHON PILOT ---
-            std_msgs::msg::Float32MultiArray wp_msg;
-            for (const auto& point : current_path_) {
-                wp_msg.data.push_back(point.x);
-                wp_msg.data.push_back(point.y);
-                wp_msg.data.push_back(5.0); // Z-altitude defaults to 5.0m
+            /for (const auto& point : current_path_) {
+                // "Carrot on a stick" fix: Only send points that are safely ahead of the drone!
+                float dist_from_drone = std::hypot(point.x - current_x_, point.y - current_y_);
+                
+                if (dist_from_drone > 0.4) { 
+                    wp_msg.data.push_back(point.x);
+                    wp_msg.data.push_back(point.y);
+                    wp_msg.data.push_back(5.0); // Z-altitude defaults to 5.0m
+                }
+            }
+
+            // If the drone is extremely close to the final goal, the pruned array might be empty. 
+            // We force the final goal coordinate into the array just in case!
+            if (wp_msg.data.empty()) {
+                wp_msg.data.push_back(goal.x);
+                wp_msg.data.push_back(goal.y);
+                wp_msg.data.push_back(5.0);
             }
             waypoint_list_pub_->publish(wp_msg);
 
