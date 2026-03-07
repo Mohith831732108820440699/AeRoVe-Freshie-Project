@@ -3,8 +3,8 @@
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <nav_msgs/msg/occupancy_grid.hpp>
 #include <geometry_msgs/msg/pose_array.hpp>
-#include <std_msgs/msg/float32_multi_array.hpp> // <-- New!
-#include <std_msgs/msg/string.hpp>              // <-- New!
+#include <std_msgs/msg/float32_multi_array.hpp> // Required for X3 Python Pilot
+#include <std_msgs/msg/string.hpp>              // Required for Mission Events
 #include <vector>
 #include <queue>
 #include <cmath>
@@ -47,33 +47,28 @@ enum class MissionState {
     MISSION_COMPLETE
 };
 
-// --- THE MAIN CLASS ---
-
 class GlobalPlanner : public rclcpp::Node
 {
 public:
     GlobalPlanner() : Node("global_planner")
     {
-        // 1. Map from OpenCV
         map_sub_ = this->create_subscription<nav_msgs::msg::OccupancyGrid>(
             "/binary_grid", 10, std::bind(&GlobalPlanner::map_callback, this, _1));
 
-        // 2. Coordinates from OpenCV (Blue circle replaces Odometry!)
         targets_sub_ = this->create_subscription<geometry_msgs::msg::PoseArray>(
             "/circle_coordinates", 10, std::bind(&GlobalPlanner::targets_callback, this, _1));
         
-        // 3. NEW: Listen to the Python script for mission events!
+        // Listen to the Python X3 Pilot for arrivals
         event_sub_ = this->create_subscription<std_msgs::msg::String>(
             "/mission_event", 10, std::bind(&GlobalPlanner::event_callback, this, _1));
-
-        // 4. NEW: Publish the path as an array for the Python script
+        
+        // Publish the Array to the Python X3 Pilot
         waypoint_list_pub_ = this->create_publisher<std_msgs::msg::Float32MultiArray>(
             "/waypoint_list", 10);
         
-        // 5. Keep RViz Visualization
         path_pub_ = this->create_publisher<nav_msgs::msg::Path>("/planned_path", 10);
             
-        // 6. Planner loop (Runs every 2 seconds to update the path)
+        // Planner loops every 2 seconds
         timer_ = this->create_wall_timer(
             std::chrono::milliseconds(2000), std::bind(&GlobalPlanner::timer_callback, this));
 
@@ -92,7 +87,9 @@ private:
     bool targets_received_ = false;
 
     MissionState current_state_ = MissionState::GOING_TO_GREEN;
+
     std::vector<Point> current_path_;   
+    bool path_calculated_ = false; // THE LOCK
 
     void map_callback(const nav_msgs::msg::OccupancyGrid::SharedPtr msg)
     {
@@ -103,9 +100,10 @@ private:
     void targets_callback(const geometry_msgs::msg::PoseArray::SharedPtr msg)
     {
         if (msg->poses.size() >= 3) {
-            // Drone current position is always the blue circle
+            // Drone is always the Blue Circle
             current_x_ = msg->poses[0].position.x;
             current_y_ = msg->poses[0].position.y;
+
             blue_x_ =  msg->poses[0].position.x;
             blue_y_ =  msg->poses[0].position.y;
             
@@ -119,70 +117,59 @@ private:
         }
     }
 
-    // NEW: Handle state transitions based on what the Python Pilot physically achieved
+    // Handles state changes when the Python pilot physically arrives
     void event_callback(const std_msgs::msg::String::SharedPtr msg)
     {
         if (msg->data == "arrived_green" && current_state_ == MissionState::GOING_TO_GREEN) {
-            RCLCPP_INFO(this->get_logger(), "EVENT: Drone reached Green! Dropping payload and switching to Yellow...");
+            RCLCPP_INFO(this->get_logger(), "EVENT: Reached Green! Dropping payload and switching to Yellow...");
             current_state_ = MissionState::GOING_TO_YELLOW;
+            path_calculated_ = false; // UNLOCK FOR NEW PATH
         }
         else if (msg->data == "arrived_yellow" && current_state_ == MissionState::GOING_TO_YELLOW) {
-            RCLCPP_INFO(this->get_logger(), "EVENT: Drone reached Yellow! Scanning Aruco and returning home...");
+            RCLCPP_INFO(this->get_logger(), "EVENT: Reached Yellow! Scanning Aruco and returning home...");
             current_state_ = MissionState::RETURN_TO_BLUE;
+            path_calculated_ = false; // UNLOCK FOR NEW PATH
         }
         else if (msg->data == "arrived_blue" && current_state_ == MissionState::RETURN_TO_BLUE) {
-            RCLCPP_INFO(this->get_logger(), "EVENT: Drone returned to Blue! MISSION COMPLETE.");
+            RCLCPP_INFO(this->get_logger(), "EVENT: Returned to Blue! MISSION COMPLETE.");
             current_state_ = MissionState::MISSION_COMPLETE;
         }
     }
 
     void timer_callback()
     {
-        if (!map_received_) return;
-        if (!targets_received_) return;
-        if (current_state_ == MissionState::MISSION_COMPLETE) return; 
+        if (!map_received_ || !targets_received_) return;
+        if (current_state_ == MissionState::MISSION_COMPLETE) return;
+
+        // If path is already sent, stop spamming the Python script
+        if (path_calculated_) return; 
 
         Point start = {current_x_, current_y_};
         Point goal;
 
-        // Set the current goal based on the state machine
-        if (current_state_ == MissionState::GOING_TO_GREEN) {
-            goal = {green_x_, green_y_};
-        } 
-        else if (current_state_ == MissionState::GOING_TO_YELLOW) {
-            goal = {yellow_x_, yellow_y_};
-        }
-        else if (current_state_ == MissionState::RETURN_TO_BLUE) {
-            goal = {blue_x_, blue_y_};
-        }
+        if (current_state_ == MissionState::GOING_TO_GREEN) goal = {green_x_, green_y_};
+        else if (current_state_ == MissionState::GOING_TO_YELLOW) goal = {yellow_x_, yellow_y_};
+        else if (current_state_ == MissionState::RETURN_TO_BLUE) goal = {blue_x_, blue_y_};
 
-        // Calculate the path
         std::vector<Point> new_path = run_a_star(start, goal);
 
         if (!new_path.empty()) {
             current_path_ = new_path;
-
-            /for (const auto& point : current_path_) {
-                // "Carrot on a stick" fix: Only send points that are safely ahead of the drone!
-                float dist_from_drone = std::hypot(point.x - current_x_, point.y - current_y_);
-                
-                if (dist_from_drone > 0.4) { 
-                    wp_msg.data.push_back(point.x);
-                    wp_msg.data.push_back(point.y);
-                    wp_msg.data.push_back(5.0); // Z-altitude defaults to 5.0m
-                }
-            }
-
-            // If the drone is extremely close to the final goal, the pruned array might be empty. 
-            // We force the final goal coordinate into the array just in case!
-            if (wp_msg.data.empty()) {
-                wp_msg.data.push_back(goal.x);
-                wp_msg.data.push_back(goal.y);
-                wp_msg.data.push_back(5.0);
+            
+            // 1. PUBLISH ARRAY TO PYTHON PILOT
+            std_msgs::msg::Float32MultiArray wp_msg;
+            // Start the loop at index 1 to avoid commanding the drone to fly to where it already is!
+            for (size_t i = 1; i < current_path_.size(); ++i) {
+                wp_msg.data.push_back(current_path_[i].x);
+                wp_msg.data.push_back(current_path_[i].y);
+                wp_msg.data.push_back(5.0); // Z-altitude defaults to 5.0m
             }
             waypoint_list_pub_->publish(wp_msg);
 
-            // --- 2. PUBLISH PATH TO RVIZ ---
+            path_calculated_ = true; // LOCK THE PLANNER
+            RCLCPP_INFO(this->get_logger(), "Path sent to X3 Python Pilot!");
+
+            // 2. RVIZ VISUALIZATION
             nav_msgs::msg::Path path_msg;
             path_msg.header.stamp = this->get_clock()->now();
             path_msg.header.frame_id = "MAP"; 
@@ -218,6 +205,7 @@ private:
             p.y < 0 || p.y >= (int)current_map_.info.height) {
             return false;
         }
+    
         int index = p.x + (p.y * current_map_.info.width);
         if (current_map_.data[index] > 50) { 
             return false;
@@ -231,16 +219,14 @@ private:
         GridPoint start = worldToGrid(start_world.x, start_world.y);
         GridPoint goal = worldToGrid(goal_world.x, goal_world.y);
 
-        // --- BULLETPROOF FIX V2: ESCAPE THE DILATION CAVE ---
+        // BUNKER BUSTER: Clear 40cm around start/goal so OpenCV dilation doesn't trap the drone
         auto force_safe = [&](GridPoint p) {
             if (p.x >= 0 && p.x < (int)current_map_.info.width && 
                 p.y >= 0 && p.y < (int)current_map_.info.height) {
                 int index = p.x + (p.y * current_map_.info.width);
-                current_map_.data[index] = 0; // Force to Safe Free Space
+                current_map_.data[index] = 0; 
             }
         };
-
-        // Carve a 40cm hole around the start and end points so the algorithm doesn't get trapped
         float escape_radius_meters = 0.4; 
         int r_cells = std::ceil(escape_radius_meters / current_map_.info.resolution);
         for (int dx = -r_cells; dx <= r_cells; dx++) {
@@ -253,7 +239,7 @@ private:
         }
 
         if (!isValid(start) || !isValid(goal)) {
-            RCLCPP_WARN(this->get_logger(), "Start or Goal is completely outside the map bounds!");
+            RCLCPP_WARN(this->get_logger(), "Start or Goal is inside an obstacle!");
             return path_world;
         }
 
@@ -315,7 +301,7 @@ private:
         RCLCPP_WARN(this->get_logger(), "No path found!");
         return path_world; 
     }
-
+    
     rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr map_sub_;
     rclcpp::Subscription<geometry_msgs::msg::PoseArray>::SharedPtr targets_sub_;
     rclcpp::Subscription<std_msgs::msg::String>::SharedPtr event_sub_;
