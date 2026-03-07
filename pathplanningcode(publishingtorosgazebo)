@@ -2,9 +2,10 @@
 #include <nav_msgs/msg/path.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <nav_msgs/msg/occupancy_grid.hpp>
+#include <nav_msgs/msg/odometry.hpp>            // <-- NEW: For exact X3 drone position!
 #include <geometry_msgs/msg/pose_array.hpp>
-#include <std_msgs/msg/float32_multi_array.hpp> // Required for X3 Python Pilot
-#include <std_msgs/msg/string.hpp>              // Required for Mission Events
+#include <std_msgs/msg/float32_multi_array.hpp> 
+#include <std_msgs/msg/string.hpp>              
 #include <vector>
 #include <queue>
 #include <cmath>
@@ -58,27 +59,26 @@ public:
         targets_sub_ = this->create_subscription<geometry_msgs::msg::PoseArray>(
             "/circle_coordinates", 10, std::bind(&GlobalPlanner::targets_callback, this, _1));
         
-        // Listen to the Python X3 Pilot for arrivals
+        // --- NEW: Subscribe to the exact Gazebo odometry for the X3 drone ---
+        odom_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
+            "/model/x3/odometry", 10, std::bind(&GlobalPlanner::odom_callback, this, _1));
+
         event_sub_ = this->create_subscription<std_msgs::msg::String>(
             "/mission_event", 10, std::bind(&GlobalPlanner::event_callback, this, _1));
         
-        // Publish the Array to the Python X3 Pilot
         waypoint_list_pub_ = this->create_publisher<std_msgs::msg::Float32MultiArray>(
             "/waypoint_list", 10);
         
         path_pub_ = this->create_publisher<nav_msgs::msg::Path>("/planned_path", 10);
             
-        // Planner loops every 2 seconds
         timer_ = this->create_wall_timer(
             std::chrono::milliseconds(2000), std::bind(&GlobalPlanner::timer_callback, this));
 
-        RCLCPP_INFO(this->get_logger(), "Planner Brain Started! Waiting for camera and map...");
+        RCLCPP_INFO(this->get_logger(), "Planner Brain Started! Waiting for data...");
     }
 
 private:
     nav_msgs::msg::OccupancyGrid current_map_;
-    float current_x_ = 0.0;
-    float current_y_ = 0.0;
     bool map_received_ = false;
 
     float green_x_ = 0.0, green_y_ = 0.0;
@@ -86,10 +86,16 @@ private:
     float blue_x_ = 0.0, blue_y_ = 0.0;
     bool targets_received_ = false;
 
-    MissionState current_state_ = MissionState::GOING_TO_GREEN;
+    // --- NEW: Exact Odometry Variables ---
+    float odom_x_ = 0.0;
+    float odom_y_ = 0.0;
+    float odom_start_x_ = 0.0;
+    float odom_start_y_ = 0.0;
+    bool odom_initialized_ = false;
 
+    MissionState current_state_ = MissionState::GOING_TO_GREEN;
     std::vector<Point> current_path_;   
-    bool path_calculated_ = false; // THE LOCK
+    bool path_calculated_ = false; 
 
     void map_callback(const nav_msgs::msg::OccupancyGrid::SharedPtr msg)
     {
@@ -100,35 +106,41 @@ private:
     void targets_callback(const geometry_msgs::msg::PoseArray::SharedPtr msg)
     {
         if (msg->poses.size() >= 3) {
-            // Drone is always the Blue Circle
-            current_x_ = msg->poses[0].position.x;
-            current_y_ = msg->poses[0].position.y;
-
             blue_x_ =  msg->poses[0].position.x;
             blue_y_ =  msg->poses[0].position.y;
-            
             green_x_ = msg->poses[1].position.x;
             green_y_ = msg->poses[1].position.y;
-            
             yellow_x_ = msg->poses[2].position.x;
             yellow_y_ = msg->poses[2].position.y;
-
             targets_received_ = true; 
         }
     }
 
-    // Handles state changes when the Python pilot physically arrives
+    // --- NEW: Get the absolute exact physical position of the drone ---
+    void odom_callback(const nav_msgs::msg::Odometry::SharedPtr msg)
+    {
+        odom_x_ = msg->pose.pose.position.x;
+        odom_y_ = msg->pose.pose.position.y;
+        
+        // Capture the spawn location so we can calculate displacement later
+        if (!odom_initialized_) {
+            odom_start_x_ = odom_x_;
+            odom_start_y_ = odom_y_;
+            odom_initialized_ = true;
+        }
+    }
+
     void event_callback(const std_msgs::msg::String::SharedPtr msg)
     {
         if (msg->data == "arrived_green" && current_state_ == MissionState::GOING_TO_GREEN) {
-            RCLCPP_INFO(this->get_logger(), "EVENT: Reached Green! Dropping payload and switching to Yellow...");
+            RCLCPP_INFO(this->get_logger(), "EVENT: Reached Green! Dropping payload...");
             current_state_ = MissionState::GOING_TO_YELLOW;
-            path_calculated_ = false; // UNLOCK FOR NEW PATH
+            path_calculated_ = false; 
         }
         else if (msg->data == "arrived_yellow" && current_state_ == MissionState::GOING_TO_YELLOW) {
-            RCLCPP_INFO(this->get_logger(), "EVENT: Reached Yellow! Scanning Aruco and returning home...");
+            RCLCPP_INFO(this->get_logger(), "EVENT: Reached Yellow! Scanning Aruco...");
             current_state_ = MissionState::RETURN_TO_BLUE;
-            path_calculated_ = false; // UNLOCK FOR NEW PATH
+            path_calculated_ = false; 
         }
         else if (msg->data == "arrived_blue" && current_state_ == MissionState::RETURN_TO_BLUE) {
             RCLCPP_INFO(this->get_logger(), "EVENT: Returned to Blue! MISSION COMPLETE.");
@@ -138,13 +150,17 @@ private:
 
     void timer_callback()
     {
-        if (!map_received_ || !targets_received_) return;
+        // Must wait until camera, map, and Gazebo odometry are all online!
+        if (!map_received_ || !targets_received_ || !odom_initialized_) return;
         if (current_state_ == MissionState::MISSION_COMPLETE) return;
-
-        // If path is already sent, stop spamming the Python script
         if (path_calculated_) return; 
 
-        Point start = {current_x_, current_y_};
+        // --- THE FIX: Calculate exact position on the OpenCV map! ---
+        // Drone started at Blue. We add the exact physical distance it has moved in Gazebo.
+        float exact_map_x = blue_x_ + (odom_x_ - odom_start_x_);
+        float exact_map_y = blue_y_ + (odom_y_ - odom_start_y_);
+
+        Point start = {exact_map_x, exact_map_y}; // TRUE DYNAMIC POSITION!
         Point goal;
 
         if (current_state_ == MissionState::GOING_TO_GREEN) goal = {green_x_, green_y_};
@@ -156,20 +172,17 @@ private:
         if (!new_path.empty()) {
             current_path_ = new_path;
             
-            // 1. PUBLISH ARRAY TO PYTHON PILOT
             std_msgs::msg::Float32MultiArray wp_msg;
-            // Start the loop at index 1 to avoid commanding the drone to fly to where it already is!
             for (size_t i = 1; i < current_path_.size(); ++i) {
                 wp_msg.data.push_back(current_path_[i].x);
                 wp_msg.data.push_back(current_path_[i].y);
-                wp_msg.data.push_back(5.0); // Z-altitude defaults to 5.0m
+                wp_msg.data.push_back(5.0); 
             }
             waypoint_list_pub_->publish(wp_msg);
 
-            path_calculated_ = true; // LOCK THE PLANNER
-            RCLCPP_INFO(this->get_logger(), "Path sent to X3 Python Pilot!");
+            path_calculated_ = true; 
+            RCLCPP_INFO(this->get_logger(), "Path planned from EXACT position [%.2f, %.2f] to Target!", exact_map_x, exact_map_y);
 
-            // 2. RVIZ VISUALIZATION
             nav_msgs::msg::Path path_msg;
             path_msg.header.stamp = this->get_clock()->now();
             path_msg.header.frame_id = "MAP"; 
@@ -205,11 +218,8 @@ private:
             p.y < 0 || p.y >= (int)current_map_.info.height) {
             return false;
         }
-    
         int index = p.x + (p.y * current_map_.info.width);
-        if (current_map_.data[index] > 50) { 
-            return false;
-        }
+        if (current_map_.data[index] > 50) return false;
         return true;
     }
 
@@ -219,7 +229,6 @@ private:
         GridPoint start = worldToGrid(start_world.x, start_world.y);
         GridPoint goal = worldToGrid(goal_world.x, goal_world.y);
 
-        // BUNKER BUSTER: Clear 40cm around start/goal so OpenCV dilation doesn't trap the drone
         auto force_safe = [&](GridPoint p) {
             if (p.x >= 0 && p.x < (int)current_map_.info.width && 
                 p.y >= 0 && p.y < (int)current_map_.info.height) {
@@ -297,13 +306,13 @@ private:
                 }
             }
         }
-
         RCLCPP_WARN(this->get_logger(), "No path found!");
         return path_world; 
     }
     
     rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr map_sub_;
     rclcpp::Subscription<geometry_msgs::msg::PoseArray>::SharedPtr targets_sub_;
+    rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_; // Exact position!
     rclcpp::Subscription<std_msgs::msg::String>::SharedPtr event_sub_;
     rclcpp::Publisher<std_msgs::msg::Float32MultiArray>::SharedPtr waypoint_list_pub_;
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr path_pub_;
