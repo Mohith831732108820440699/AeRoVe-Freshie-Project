@@ -50,6 +50,7 @@ class Image_processing(Node):
 
         #important functions for circle detection and pixel to world conversion
         def circle_detection(contours):
+            #Circle dection using CONVEX HULL 
             if contours:
                 c    = max(contours, key=cv.contourArea)
                 hull = cv.convexHull(c)
