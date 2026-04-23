@@ -87,10 +87,9 @@ private:
     std::vector<Point> current_path_;
     size_t current_wp_index_ = 0;
 
-    // ------------------------------------------------------------------
+    
     // Inflate every obstacle cell by inflation_radius_m_ so that A* will
-    // naturally route the drone away from walls.
-    // ------------------------------------------------------------------
+    // treat nearby cells as blocked and keep the drone at a safe distance
     void inflate_map() {
         const int w = static_cast<int>(current_map_.info.width);
         const int h = static_cast<int>(current_map_.info.height);
@@ -167,7 +166,7 @@ private:
             // Path visualisation
             nav_msgs::msg::Path path_msg;
             path_msg.header.stamp    = this->get_clock()->now();
-            path_msg.header.frame_id = "MAP";
+            path_msg.header.frame_id = "map";
 
             for (const auto& point : current_path_) {
                 geometry_msgs::msg::PoseStamped pose;
