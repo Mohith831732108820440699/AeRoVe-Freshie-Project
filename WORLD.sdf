@@ -1,0 +1,281 @@
+<?xml version="1.0" ?>
+<sdf version="1.6">
+  <world name="recon_mission">
+    <physics name="4ms" type="ignored">
+      <max_step_size>0.004</max_step_size>
+      <real_time_factor>1.0</real_time_factor>
+    </physics>
+    <plugin filename="gz-sim-physics-system"
+            name="gz::sim::systems::Physics"/>
+    <plugin filename="gz-sim-scene-broadcaster-system"
+            name="gz::sim::systems::SceneBroadcaster"/>
+    <plugin filename="gz-sim-user-commands-system"
+            name="gz::sim::systems::UserCommands"/>
+    <plugin filename="gz-sim-sensors-system"
+            name="gz::sim::systems::Sensors">
+      <render_engine>ogre2</render_engine>
+    </plugin>
+
+    <light type="directional" name="sun">
+      <cast_shadows>true</cast_shadows>
+      <pose>0 0 10 0 0 0</pose>
+      <diffuse>0.8 0.8 0.8 1</diffuse>
+      <specular>0.2 0.2 0.2 1</specular>
+    </light>
+
+    <!-- Ground plane -->
+    <model name="ground_plane">
+      <static>true</static>
+      <pose>5 5 0 0 0 0</pose>
+      <link name="link">
+        <collision name="collision">
+          <geometry><plane><normal>0 0 1</normal><size>10 10</size></plane></geometry>
+        </collision>
+        <visual name="visual">
+          <geometry><plane><normal>0 0 1</normal><size>10 10</size></plane></geometry>
+          <material><ambient>0.4 0.4 0.4 1</ambient><diffuse>0.4 0.4 0.4 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- Blue disc — start/land, centre (5,1) -->
+    <model name="blue_disc"><static>true</static><pose>5 1 0.01 0 0 0</pose>
+      <link name="link"><visual name="v"><geometry><cylinder><radius>2</radius><length>0.02</length></cylinder></geometry>
+      <material><ambient>0 0.3 1 1</ambient><diffuse>0 0.3 1 1</diffuse></material></visual></link></model>
+
+    <!-- Green disc — payload drop, centre (2,6) -->
+    <model name="green_disc"><static>true</static><pose>2 6 0.01 0 0 0</pose>
+      <link name="link"><visual name="v"><geometry><cylinder><radius>2</radius><length>0.02</length></cylinder></geometry>
+      <material><ambient>0 0.8 0 1</ambient><diffuse>0 0.8 0 1</diffuse></material></visual></link></model>
+
+    <!-- Yellow disc — ArUco scan, centre (8,8) -->
+    <model name="yellow_disc"><static>true</static><pose>8 8 0.01 0 0 0</pose>
+      <link name="link"><visual name="v"><geometry><cylinder><radius>2</radius><length>0.02</length></cylinder></geometry>
+      <material><ambient>1 1 0 1</ambient><diffuse>1 1 0 1</diffuse></material></visual></link></model>
+
+    <!--
+      ArUco Marker — ID 0, DICT_4X4_50
+      Placed flat on the ground at the centre of the yellow disc (8, 8).
+      The marker is a thin white board (0.6 x 0.6 m) with a black border
+      drawn using four thin black strips around a grey centre square.
+      OpenCV ArUco will detect the high-contrast black/white pattern from
+      the overhead camera. Rotating 90° around X makes it face upward.
+    -->
+    <model name="aruco_marker_0">
+      <static>true</static>
+      <!-- Sits flat on the yellow disc, slightly above it so it is visible -->
+      <pose>8 8 0.03 0 0 0</pose>
+      <link name="link">
+
+        <!-- White background board -->
+        <visual name="white_board">
+          <geometry><box><size>0.6 0.6 0.005</size></box></geometry>
+          <material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse></material>
+        </visual>
+
+        <!-- Black outer border — top strip -->
+        <visual name="border_top">
+          <pose>0 0.225 0.003 0 0 0</pose>
+          <geometry><box><size>0.6 0.15 0.005</size></box></geometry>
+          <material><ambient>0 0 0 1</ambient><diffuse>0 0 0 1</diffuse></material>
+        </visual>
+        <!-- Black outer border — bottom strip -->
+        <visual name="border_bottom">
+          <pose>0 -0.225 0.003 0 0 0</pose>
+          <geometry><box><size>0.6 0.15 0.005</size></box></geometry>
+          <material><ambient>0 0 0 1</ambient><diffuse>0 0 0 1</diffuse></material>
+        </visual>
+        <!-- Black outer border — left strip -->
+        <visual name="border_left">
+          <pose>-0.225 0 0.003 0 0 0</pose>
+          <geometry><box><size>0.15 0.3 0.005</size></box></geometry>
+          <material><ambient>0 0 0 1</ambient><diffuse>0 0 0 1</diffuse></material>
+        </visual>
+        <!-- Black outer border — right strip -->
+        <visual name="border_right">
+          <pose>0.225 0 0.003 0 0 0</pose>
+          <geometry><box><size>0.15 0.3 0.005</size></box></geometry>
+          <material><ambient>0 0 0 1</ambient><diffuse>0 0 0 1</diffuse></material>
+        </visual>
+
+        <!-- Inner data cells for ArUco ID 0 (4x4 pattern: all white interior) -->
+        <!-- Centre data region — light grey so camera sees contrast with border -->
+        <visual name="data_region">
+          <pose>0 0 0.004 0 0 0</pose>
+          <geometry><box><size>0.3 0.3 0.005</size></box></geometry>
+          <material><ambient>0.85 0.85 0.85 1</ambient><diffuse>0.85 0.85 0.85 1</diffuse></material>
+        </visual>
+
+        <!-- No collision needed — marker is purely visual -->
+      </link>
+    </model>
+
+    <!-- Obstacles -->
+    <model name="obs1"><static>true</static><pose>4 4 3 0 0 0</pose><link name="link">
+      <collision name="c"><geometry><box><size>1 1 6</size></box></geometry></collision>
+      <visual name="v"><geometry><box><size>1 1 6</size></box></geometry>
+      <material><ambient>0.15 0.15 0.15 1</ambient></material></visual></link></model>
+    <model name="obs2"><static>true</static><pose>8 4 3 0 0 0</pose><link name="link">
+      <collision name="c"><geometry><box><size>1 1 6</size></box></geometry></collision>
+      <visual name="v"><geometry><box><size>1 1 6</size></box></geometry>
+      <material><ambient>0.15 0.15 0.15 1</ambient></material></visual></link></model>
+    <model name="obs3"><static>true</static><pose>3 3 3 0 0 0</pose><link name="link">
+      <collision name="c"><geometry><box><size>1 1 6</size></box></geometry></collision>
+      <visual name="v"><geometry><box><size>1 1 6</size></box></geometry>
+      <material><ambient>0.15 0.15 0.15 1</ambient></material></visual></link></model>
+    <model name="obs4"><static>true</static><pose>6 6 3 0 0 0</pose><link name="link">
+      <collision name="c"><geometry><box><size>1 1 6</size></box></geometry></collision>
+      <visual name="v"><geometry><box><size>1 1 6</size></box></geometry>
+      <material><ambient>0.15 0.15 0.15 1</ambient></material></visual></link></model>
+    <model name="obs5"><static>true</static><pose>5 6 3 0 0 0</pose><link name="link">
+      <collision name="c"><geometry><box><size>1 1 6</size></box></geometry></collision>
+      <visual name="v"><geometry><box><size>1 1 6</size></box></geometry>
+      <material><ambient>0.15 0.15 0.15 1</ambient></material></visual></link></model>
+    <model name="obs6"><static>true</static><pose>6 9 3 0 0 0</pose><link name="link">
+      <collision name="c"><geometry><box><size>1 1 6</size></box></geometry></collision>
+      <visual name="v"><geometry><box><size>1 1 6</size></box></geometry>
+      <material><ambient>0.15 0.15 0.15 1</ambient></material></visual></link></model>
+
+    <!-- Overhead camera -->
+    <model name="overhead_camera"><static>true</static><pose>5 5 20 0 1.5707 0</pose>
+      <link name="link">
+        <visual name="visual"><geometry><box><size>0.3 0.3 0.3</size></box></geometry>
+          <material><ambient>1 0 0 1</ambient></material></visual>
+        <sensor name="camera" type="camera">
+          <camera>
+            <horizontal_fov>1.5708</horizontal_fov>
+            <image><width>1280</width><height>1280</height><format>R8G8B8</format></image>
+            <clip><near>0.5</near><far>25</far></clip>
+          </camera>
+          <always_on>1</always_on><update_rate>10</update_rate>
+          <topic>/overhead_camera/image</topic>
+        </sensor>
+      </link>
+    </model>
+
+    <!-- X3 drone spawned at blue disc centre (5,1) -->
+    <include>
+      <uri>https://fuel.gazebosim.org/1.0/OpenRobotics/models/X3 UAV/4</uri>
+      <pose>5 1 0.3 0 0 0</pose>
+      <plugin filename="gz-sim-multicopter-motor-model-system"
+              name="gz::sim::systems::MulticopterMotorModel">
+        <robotNamespace>X3</robotNamespace>
+        <jointName>X3/rotor_0_joint</jointName>
+        <linkName>X3/rotor_0</linkName>
+        <turningDirection>ccw</turningDirection>
+        <timeConstantUp>0.0125</timeConstantUp>
+        <timeConstantDown>0.025</timeConstantDown>
+        <maxRotVelocity>800.0</maxRotVelocity>
+        <motorConstant>8.54858e-06</motorConstant>
+        <momentConstant>0.016</momentConstant>
+        <commandSubTopic>gazebo/command/motor_speed</commandSubTopic>
+        <actuator_number>0</actuator_number>
+        <rotorDragCoefficient>8.06428e-05</rotorDragCoefficient>
+        <rollingMomentCoefficient>1e-06</rollingMomentCoefficient>
+        <motorSpeedPubTopic>motor_speed/0</motorSpeedPubTopic>
+        <rotorVelocitySlowdownSim>10</rotorVelocitySlowdownSim>
+        <motorType>velocity</motorType>
+      </plugin>
+      <plugin filename="gz-sim-multicopter-motor-model-system"
+              name="gz::sim::systems::MulticopterMotorModel">
+        <robotNamespace>X3</robotNamespace>
+        <jointName>X3/rotor_1_joint</jointName>
+        <linkName>X3/rotor_1</linkName>
+        <turningDirection>ccw</turningDirection>
+        <timeConstantUp>0.0125</timeConstantUp>
+        <timeConstantDown>0.025</timeConstantDown>
+        <maxRotVelocity>800.0</maxRotVelocity>
+        <motorConstant>8.54858e-06</motorConstant>
+        <momentConstant>0.016</momentConstant>
+        <commandSubTopic>gazebo/command/motor_speed</commandSubTopic>
+        <actuator_number>1</actuator_number>
+        <rotorDragCoefficient>8.06428e-05</rotorDragCoefficient>
+        <rollingMomentCoefficient>1e-06</rollingMomentCoefficient>
+        <motorSpeedPubTopic>motor_speed/1</motorSpeedPubTopic>
+        <rotorVelocitySlowdownSim>10</rotorVelocitySlowdownSim>
+        <motorType>velocity</motorType>
+      </plugin>
+      <plugin filename="gz-sim-multicopter-motor-model-system"
+              name="gz::sim::systems::MulticopterMotorModel">
+        <robotNamespace>X3</robotNamespace>
+        <jointName>X3/rotor_2_joint</jointName>
+        <linkName>X3/rotor_2</linkName>
+        <turningDirection>cw</turningDirection>
+        <timeConstantUp>0.0125</timeConstantUp>
+        <timeConstantDown>0.025</timeConstantDown>
+        <maxRotVelocity>800.0</maxRotVelocity>
+        <motorConstant>8.54858e-06</motorConstant>
+        <momentConstant>0.016</momentConstant>
+        <commandSubTopic>gazebo/command/motor_speed</commandSubTopic>
+        <actuator_number>2</actuator_number>
+        <rotorDragCoefficient>8.06428e-05</rotorDragCoefficient>
+        <rollingMomentCoefficient>1e-06</rollingMomentCoefficient>
+        <motorSpeedPubTopic>motor_speed/2</motorSpeedPubTopic>
+        <rotorVelocitySlowdownSim>10</rotorVelocitySlowdownSim>
+        <motorType>velocity</motorType>
+      </plugin>
+      <plugin filename="gz-sim-multicopter-motor-model-system"
+              name="gz::sim::systems::MulticopterMotorModel">
+        <robotNamespace>X3</robotNamespace>
+        <jointName>X3/rotor_3_joint</jointName>
+        <linkName>X3/rotor_3</linkName>
+        <turningDirection>cw</turningDirection>
+        <timeConstantUp>0.0125</timeConstantUp>
+        <timeConstantDown>0.025</timeConstantDown>
+        <maxRotVelocity>800.0</maxRotVelocity>
+        <motorConstant>8.54858e-06</motorConstant>
+        <momentConstant>0.016</momentConstant>
+        <commandSubTopic>gazebo/command/motor_speed</commandSubTopic>
+        <actuator_number>3</actuator_number>
+        <rotorDragCoefficient>8.06428e-05</rotorDragCoefficient>
+        <rollingMomentCoefficient>1e-06</rollingMomentCoefficient>
+        <motorSpeedPubTopic>motor_speed/3</motorSpeedPubTopic>
+        <rotorVelocitySlowdownSim>10</rotorVelocitySlowdownSim>
+        <motorType>velocity</motorType>
+      </plugin>
+      <plugin filename="gz-sim-multicopter-control-system"
+              name="gz::sim::systems::MulticopterVelocityControl">
+        <robotNamespace>X3</robotNamespace>
+        <commandSubTopic>gazebo/command/twist</commandSubTopic>
+        <enableSubTopic>enable</enableSubTopic>
+        <comLinkName>X3/base_link</comLinkName>
+        <velocityGain>2.7 2.7 2.7</velocityGain>
+        <attitudeGain>2 3 0.15</attitudeGain>
+        <angularRateGain>0.4 0.52 0.18</angularRateGain>
+        <maximumLinearAcceleration>2 2 2</maximumLinearAcceleration>
+        <rotorConfiguration>
+          <rotor>
+            <jointName>X3/rotor_0_joint</jointName>
+            <forceConstant>8.54858e-06</forceConstant>
+            <momentConstant>0.016</momentConstant>
+            <direction>1</direction>
+          </rotor>
+          <rotor>
+            <jointName>X3/rotor_1_joint</jointName>
+            <forceConstant>8.54858e-06</forceConstant>
+            <momentConstant>0.016</momentConstant>
+            <direction>1</direction>
+          </rotor>
+          <rotor>
+            <jointName>X3/rotor_2_joint</jointName>
+            <forceConstant>8.54858e-06</forceConstant>
+            <momentConstant>0.016</momentConstant>
+            <direction>-1</direction>
+          </rotor>
+          <rotor>
+            <jointName>X3/rotor_3_joint</jointName>
+            <forceConstant>8.54858e-06</forceConstant>
+            <momentConstant>0.016</momentConstant>
+            <direction>-1</direction>
+          </rotor>
+        </rotorConfiguration>
+      </plugin>
+      <plugin filename="gz-sim-odometry-publisher-system"
+              name="gz::sim::systems::OdometryPublisher">
+        <dimensions>3</dimensions>
+      </plugin>
+
+    </include>
+
+  </world>
+</sdf>
